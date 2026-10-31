@@ -1,0 +1,6 @@
+[Unit]
+Description=Time Machine scheduled btrfs snapshot
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/sudo -n /usr/local/bin/omarchy-timemachine schedule

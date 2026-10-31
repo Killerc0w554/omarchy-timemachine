@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily Time Machine snapshot
+
+[Timer]
+# Daily at 09:30 local, with a random 30-minute spread so machines on the same
+# schedule don't all snapshot at once. Persistent catches up a run missed while
+# the machine was off/asleep on the next boot.
+OnCalendar=*-*-* 09:30:00
+Persistent=true
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target

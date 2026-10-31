@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Root helper for the smorg.timemachine shell plugin.
+#
+# Installed as /usr/local/bin/omarchy-timemachine and granted to the desktop
+# user through /etc/sudoers.d/omarchy-timemachine. It is deliberately tiny and
+# only does the four things the bar panel needs, so the passwordless sudo rule
+# cannot be bent into arbitrary root commands.
+#
+# Every command prints one JSON object on stdout:
+#   {"ok":true,...}  or  {"ok":false,"error":"..."}
+
+set -euo pipefail
+
+readonly CONFIG="root"
+readonly SNAPPER="/usr/bin/snapper"
+readonly JQ="/usr/bin/jq"
+
+fail() {
+  "$JQ" -cn --arg e "$1" '{ok:false, error:$e}'
+  exit 0
+}
+
+# Strip control characters/newlines, collapse whitespace, cap the label.
+clean_description() {
+  local value="$1"
+  value="${value//$'\r'/ }"
+  value="${value//$'\n'/ }"
+  value="${value//$'\t'/ }"
+  value="$(printf '%s' "$value" | tr -d '\000-\010\013\014\016-\037')"
+  value="$(printf '%s' "$value" | sed -e 's/  */ /g' -e 's/^ //' -e 's/ $//')"
+  printf '%s' "${value:0:100}"
+}
+
+command="${1:-}"
+
+case "$command" in
+  list)
+    [[ $# -eq 1 ]] || fail "list takes no arguments"
+    if [[ ! -f /etc/snapper/configs/$CONFIG ]]; then
+      fail "The snapper '$CONFIG' config is missing."
+    fi
+    raw=""
+    if ! raw="$("$SNAPPER" --config "$CONFIG" --jsonout list --disable-used-space 2>&1)"; then
+      fail "${raw:-snapper list failed}"
+    fi
+    if ! "$JQ" -e 'type == "array" or type == "object"' >/dev/null 2>&1 <<<"$raw"; then
+      fail "${raw:-snapper returned unreadable output}"
+    fi
+    "$JQ" -c --arg config "$CONFIG" '
+      if type == "array" then
+        {ok: true, snapshots: .}
+      elif (.[$config] | type) == "array" then
+        {ok: true, snapshots: .[$config]}
+      else
+        {ok: false, error: ("snapper returned no snapshot list for config " + $config)}
+      end' <<<"$raw"
+    ;;
+
+  create)
+    [[ $# -eq 2 ]] || fail "create takes exactly one description"
+    description="$(clean_description "$2")"
+    [[ -n $description ]] || description="Manual snapshot"
+    if ! output="$("$SNAPPER" --config "$CONFIG" create \
+        --cleanup-algorithm number \
+        --userdata important=yes \
+        --description "$description" 2>&1)"; then
+      fail "${output:-snapper create failed}"
+    fi
+    "$JQ" -cn --arg description "$description" \
+      '{ok:true, description:$description}'
+    ;;
+
+  schedule)
+    [[ $# -le 2 ]] || fail "schedule takes at most one description"
+    description="$(clean_description "${2:-}")"
+    [[ -n $description ]] || description="Scheduled snapshot"
+    # Scheduled snapshots use the plain "number" cleanup (no important=yes) so
+    # they live in the rolling pool alongside Omarchy's pre-update snapshots
+    # and never evict a manual "important" snapshot.
+    if ! output="$("$SNAPPER" --config "$CONFIG" create \
+        --cleanup-algorithm number \
+        --description "$description" 2>&1)"; then
+      fail "${output:-snapper create failed}"
+    fi
+    "$JQ" -cn --arg description "$description" \
+      '{ok:true, description:$description}'
+    ;;
+
+  delete)
+    [[ $# -eq 2 ]] || fail "delete takes exactly one snapshot number"
+    [[ "$2" =~ ^[0-9]{1,9}$ ]] || fail "invalid snapshot number"
+    number=$((10#$2))
+    (( number > 0 )) || fail "the current system (0) cannot be deleted"
+    if ! output="$("$SNAPPER" --config "$CONFIG" delete "$number" 2>&1)"; then
+      fail "${output:-snapper delete failed}"
+    fi
+    "$JQ" -cn --argjson number "$number" '{ok:true, number:$number}'
+    ;;
+
+  *)
+    fail "usage: omarchy-timemachine <list|create <description>|schedule [description]|delete <number>>"
+    ;;
+esac

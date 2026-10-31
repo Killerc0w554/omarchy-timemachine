@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# Manage the Time Machine automatic snapshot timer (systemd --user).
+#
+# Human commands:
+#   timemachine-schedule status    show timer state + next run
+#   timemachine-schedule enable    install + enable the daily timer
+#   timemachine-schedule disable   stop + disable the timer
+#   timemachine-schedule now       take one scheduled-style snapshot now
+#
+# Machine commands (for the bar panel):
+#   timemachine-schedule status-json       {"enabled":bool,"frequency":"daily","nextRun":"..."}
+#   timemachine-schedule set <off|6h|daily|weekly>
+#
+# The timer fires `sudo -n /usr/local/bin/omarchy-timemachine schedule`, which
+# relies on the passwordless sudoers rule installed by setup.sh.
+
+set -euo pipefail
+
+UNIT="omarchy-timemachine.timer"
+TIMER_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/omarchy-timemachine.timer"
+HELPER="/usr/local/bin/omarchy-timemachine"
+
+usage() {
+  sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+# frequency -> OnCalendar value
+oncalendar_for() {
+  case "$1" in
+    6h)     echo "*-*-* 00/6:00:00" ;;
+    daily)  echo "*-*-* 09:30:00" ;;
+    weekly) echo "Mon *-*-* 09:30:00" ;;
+    *)      echo "" ;;
+  esac
+}
+
+write_timer() {
+  local oc="$1"
+  mkdir -p "$(dirname "$TIMER_FILE")"
+  cat > "$TIMER_FILE" <<EOF
+[Unit]
+Description=Time Machine automatic snapshot
+
+[Timer]
+OnCalendar=$oc
+Persistent=true
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target
+EOF
+}
+
+# OnCalendar value -> frequency label
+frequency_from_file() {
+  if [[ ! -f $TIMER_FILE ]]; then echo "off"; return; fi
+  local oc
+  oc="$(grep -m1 '^OnCalendar=' "$TIMER_FILE" | cut -d= -f2- | tr -d ' ')"
+  case "$oc" in
+    "*-*-*00/6:00:00") echo "6h" ;;
+    "*-*-*09:30:00")   echo "daily" ;;
+    "Mon*-*-*09:30:00") echo "weekly" ;;
+    *)                 echo "custom" ;;
+  esac
+}
+
+is_enabled() {
+  [[ "$(systemctl --user is-enabled "$UNIT" 2>/dev/null || echo disabled)" == "enabled" ]]
+}
+
+next_run() {
+  local us
+  us="$(systemctl --user list-timers --no-pager --output=json "$UNIT" 2>/dev/null | jq -r '.[0].next // "0"' 2>/dev/null || true)"
+  if [[ -z $us || $us == "0" ]]; then
+    echo ""
+    return
+  fi
+  date -d "@$(( us / 1000000 ))" '+%a %d %b · %H:%M' 2>/dev/null || echo ""
+}
+
+cmd="${1:-}"
+
+case "$cmd" in
+  status)
+    systemctl --user is-enabled "$UNIT" 2>/dev/null || true
+    systemctl --user is-active "$UNIT" 2>/dev/null || true
+    systemctl --user list-timers "$UNIT" --no-pager 2>/dev/null || true
+    ;;
+
+  status-json)
+    enabled="false"
+    is_enabled && enabled="true"
+    next="$(next_run)"
+    jq -n --argjson enabled "$enabled" --arg frequency "$(frequency_from_file)" --arg next "$next" \
+      '{enabled:$enabled, frequency:$frequency, nextRun:$next}'
+    ;;
+
+  enable)
+    systemctl --user daemon-reload
+    systemctl --user enable --now "$UNIT"
+    echo "Enabled. Next runs:"
+    systemctl --user list-timers "$UNIT" --no-pager
+    ;;
+
+  disable)
+    systemctl --user disable --now "$UNIT"
+    echo "Disabled."
+    ;;
+
+  set)
+    freq="${2:-off}"
+    if [[ $freq == "off" ]]; then
+      systemctl --user disable --now "$UNIT" 2>/dev/null || true
+      jq -cn '{ok:true, frequency:"off", enabled:false}'
+    else
+      oc="$(oncalendar_for "$freq")"
+      [[ -n $oc ]] || { jq -cn '{ok:false, error:"unknown frequency"}'; exit 0; }
+      write_timer "$oc"
+      systemctl --user daemon-reload
+      systemctl --user enable --now "$UNIT"
+      jq -cn --arg frequency "$freq" '{ok:true, frequency:$frequency, enabled:true}'
+    fi
+    ;;
+
+  now|run)
+    exec /usr/bin/sudo -n "$HELPER" schedule
+    ;;
+
+  *)
+    usage
+    exit 1
+    ;;
+esac

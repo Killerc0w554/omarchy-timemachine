@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "smorg.timemachine",
+  "name": "Time Machine",
+  "version": "1.0.0",
+  "author": "smorg",
+  "license": "MIT",
+  "description": "Btrfs/snapper snapshots of the system, one click before you break something",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Time Machine",
+    "description": "Take, inspect and delete snapper snapshots, and reboot to restore one",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 60
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Snapshot list refresh interval (seconds)",
+        "min": 10,
+        "max": 3600,
+        "step": 10,
+        "defaultValue": 60
+      }
+    ]
+  }
+}
